@@ -1,0 +1,529 @@
+<!doctype html>
+<!--
+  Liquid Glass —— SVG feDisplacementMap 跨浏览器复刻
+  ============================================================
+  原理（与原版一致）：
+    1. 用 canvas 按「圆角矩形的有向距离场(SDF)」画出一张位移贴图(PNG)，
+       R 通道 = x 位移、G 通道 = y 位移，边缘根据法线方向折射。
+    2. 把贴图喂进 SVG <feDisplacementMap>。
+    3. 用 CSS `filter: url(#id)`（不是 backdrop-filter —— Safari 不支持 SVG
+       backdrop-filter）作用在「场景的一份克隆」上，克隆与真实场景严丝对齐，
+       于是看起来就是玻璃在折射背后的内容。
+    4. 每次重绘换一个新的 filter id —— 绕过 Safari 对 filter 结果的缓存。
+       （技巧来自 Aave 团队：https://aave.com/design/building-glass-for-the-web）
+-->
+<html lang="zh">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Liquid Glass · feDisplacementMap</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  html, body { height: 100%; overflow: hidden; background: #0b0c10; }
+
+  body { display: flex; }
+
+  /* ——— 画布 / 交互场景 ——— */
+  .playground {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+    touch-action: none;
+  }
+
+  .scene { position: absolute; inset: 0; }
+
+  .background-image {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(1200px 800px at 70% 20%, #ff9a56 0%, rgba(255,154,86,0) 55%),
+      radial-gradient(900px 900px at 20% 80%, #6a5cff 0%, rgba(106,92,255,0) 55%),
+      linear-gradient(160deg, #1b1030 0%, #2a1147 35%, #5a2a6e 70%, #ff7e5f 100%);
+  }
+  /* 一点网格，方便看清折射 */
+  .background-image::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.07) 1px, transparent 1px);
+    background-size: 46px 46px;
+  }
+
+  .caption {
+    position: absolute;
+    top: 8%;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #fff;
+    font-size: clamp(40px, 9vw, 120px);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    text-shadow: 0 6px 30px rgba(0,0,0,0.35);
+    white-space: nowrap;
+  }
+  .unselectable { user-select: none; -webkit-user-select: none; }
+
+  .orb {
+    position: absolute;
+    left: 22%;
+    bottom: 14%;
+    width: 220px;
+    height: 220px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 32% 28%, #fff6c0, #ff5e62 55%, #b3005f 100%);
+    box-shadow: 0 30px 80px rgba(179,0,95,0.5);
+  }
+
+  /* ——— 镜片 ——— */
+  .lens {
+    position: absolute;
+    top: 220px;
+    left: 200px;
+    width: 320px;
+    height: 220px;
+    border-radius: 44px;
+    cursor: grab;
+    isolation: isolate;
+    z-index: 5;
+    box-shadow: 0 14px 40px rgba(0,0,0,0.28);
+    touch-action: none;
+  }
+  .lens.dragging { cursor: grabbing; }
+
+  /* 内层裁剪：带 filter/blend 的合成层在 WebKit 下会逃出父级 overflow 裁剪，
+     这里用 clip-path 把它们重新裁成圆角 */
+  .lens-clip { position: absolute; inset: 0; }
+
+  .lens-blur { position: absolute; inset: 0; will-change: filter; }
+
+  /* 折射层：承载场景克隆 + 应用 url() 位移滤镜（其 left/top/width/height 由 JS 设置） */
+  .lens-refraction { position: absolute; pointer-events: none; will-change: filter; }
+  .lens-refraction .clone { position: absolute; top: 0; left: 0; }
+
+  /* 玻璃染色层 */
+  .lens-tint {
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    mix-blend-mode: multiply;
+    background: #ffffff;
+    opacity: 0;
+  }
+
+  /* 高光 / 斜面：纯 CSS 叠加（原版用 2 道 SVG 滤镜，这里用 box-shadow + 渐变边） */
+  .lens-glint {
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow:
+      inset 1.5px 1.5px 1px rgba(255,255,255,0.9),
+      inset -1.5px -1.5px 1px rgba(255,255,255,0.5),
+      inset 0 0 12px rgba(255,255,255,0.15);
+  }
+  /* 顶部那道最亮的反光描边 */
+  .lens-glint::after {
+    content: "";
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.75), rgba(255,255,255,0) 24%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+  }
+
+  /* ——— FAB（收起 / 菜单切换） ——— */
+  .fab {
+    position: absolute;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    width: 56px; height: 56px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.12);
+    backdrop-filter: blur(8px);
+    cursor: pointer;
+    z-index: 8;
+    display: grid; place-items: center;
+  }
+  .fab svg { position: absolute; width: 24px; height: 24px; transition: opacity .25s, transform .25s; }
+  .fab .ic line, .fab .ic circle { stroke: #fff; stroke-width: 2; stroke-linecap: round; fill: #fff; }
+  .fab .ic line { fill: none; }
+  .fab .ic-x { opacity: 1; }
+  .fab .ic-dots { opacity: 0; transform: scale(.6); }
+  .fab.collapsed .ic-x { opacity: 0; transform: scale(.6); }
+  .fab.collapsed .ic-dots { opacity: 1; transform: scale(1); }
+
+  /* ——— 控制面板 ——— */
+  .panel {
+    width: 280px;
+    flex-shrink: 0;
+    padding: 18px;
+    background: #1c1c1e;
+    color: #e6e6e6;
+    font-size: 13px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .panel h3 {
+    font-size: 12px; letter-spacing: .05em; text-transform: uppercase;
+    color: #8a8a90; margin-bottom: 4px;
+  }
+  .panel label {
+    display: grid;
+    grid-template-columns: 78px 1fr 38px;
+    align-items: center;
+    gap: 10px;
+  }
+  .panel input[type=range] { width: 100%; accent-color: #6a9; }
+  .panel .val { text-align: right; color: #bdbdc2; }
+  .panel input[type=color] { width: 38px; height: 24px; border: none; background: none; }
+
+  .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .preset {
+    flex: 1 1 calc(50% - 4px);
+    padding: 9px 8px;
+    border: 1px solid #3a3a3e;
+    border-radius: 9px;
+    background: #2a2a2e;
+    color: #e6e6e6;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .preset:hover { background: #34343a; }
+
+  @media (max-width: 760px) {
+    body { flex-direction: column; }
+    .panel { width: 100%; height: 44%; }
+    .playground { height: 56%; flex: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="playground" id="canvas">
+    <div class="scene" id="scene">
+      <div class="background-image"></div>
+      <h2 class="caption unselectable">Liquid&nbsp;Glass</h2>
+      <div class="orb"></div>
+    </div>
+
+    <div class="lens" id="lens">
+      <div class="lens-clip" id="lensClip">
+        <div class="lens-blur" id="blurWrap">
+          <div class="lens-refraction" id="refraction">
+            <div class="clone" id="clone"></div>
+          </div>
+        </div>
+        <div class="lens-tint" id="tintLayer"></div>
+        <div class="lens-glint" id="glintLayer"></div>
+      </div>
+    </div>
+
+    <button class="fab" id="fab" type="button" aria-label="Toggle menu">
+      <svg class="ic ic-x" viewBox="0 0 24 24" aria-hidden="true">
+        <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+      </svg>
+      <svg class="ic ic-dots" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="panel">
+    <h3>Lens controls</h3>
+    <label>Depth      <input type="range" id="depth"  min="0"   max="120"  step="1"    value="60"><span class="val" id="depth-v">60</span></label>
+    <label>Splay      <input type="range" id="splay"  min="2"   max="40"   step="1"    value="2"><span class="val" id="splay-v">2</span></label>
+    <label>Feather    <input type="range" id="feather" min="0"  max="40"   step="1"    value="24"><span class="val" id="feather-v">24</span></label>
+    <label>Curvature  <input type="range" id="curve"  min="0.3" max="3"    step="0.1"  value="2"><span class="val" id="curve-v">2</span></label>
+    <label>Blur       <input type="range" id="blur"   min="0"   max="5"    step="0.01" value="0"><span class="val" id="blur-v">0</span></label>
+    <label>Chromatic  <input type="range" id="chroma" min="0"   max="0.25" step="0.01" value="0"><span class="val" id="chroma-v">0</span></label>
+    <label>Glint      <input type="range" id="glint"  min="0"   max="150"  step="5"    value="25"><span class="val" id="glint-v">25</span></label>
+    <label>Tint       <input type="range" id="tint"   min="0"   max="1"    step="0.01" value="0"><span class="val" id="tint-v">0</span></label>
+    <label>Tint color <input type="color" id="tintColor" value="#ffffff"></label>
+    <div class="presets">
+      <button type="button" class="preset" data-preset="soft">Simple glass</button>
+      <button type="button" class="preset" data-preset="thick">Thick glass</button>
+      <button type="button" class="preset" data-preset="frosted">Frosted glass</button>
+      <button type="button" class="preset" data-preset="cut">Cut glass</button>
+      <button type="button" class="preset" data-preset="plexi">Orange plexiglass</button>
+    </div>
+  </div>
+
+  <!-- 每帧把新的 <filter> 注入这里 -->
+  <svg id="filter-housing" width="0" height="0" xmlns:xlink="http://www.w3.org/1999/xlink"
+       style="position:absolute"></svg>
+
+<script>
+(() => {
+  "use strict";
+
+  // ——— 元素 ———
+  const canvas     = document.getElementById("canvas");
+  const scene      = document.getElementById("scene");
+  const lens       = document.getElementById("lens");
+  const blurWrap   = document.getElementById("blurWrap");
+  const refraction = document.getElementById("refraction");
+  const clone      = document.getElementById("clone");
+  const tintLayer  = document.getElementById("tintLayer");
+  const glintLayer = document.getElementById("glintLayer");
+  const housing    = document.getElementById("filter-housing");
+  const fab        = document.getElementById("fab");
+
+  const PAD = 24;   // 贴图在镜片四周留出的折射采样余量
+  const BOOST = 0.85;
+  let version = 0;  // 给每个 filter 新 id
+
+  // ——— 镜片状态 ———
+  const state = {
+    x: 200, y: 220, w: 320, h: 220, r: 44,
+    depth: 60, splay: 2, feather: 24, curve: 2,
+    blur: 0, chroma: 0, glint: 25, tint: 0, tintColor: "#ffffff",
+  };
+
+  const clamp255 = v => v < 0 ? 0 : v > 255 ? 255 : v;
+
+  // ——— 位移贴图（圆角矩形 SDF）———
+  const mapCache = new Map();
+  function buildLensMap(w, h, radius, rim, curve, feather) {
+    const mw = w + 2 * PAD, mh = h + 2 * PAD;
+    const key = [mw, mh, w, h, radius, rim, curve, feather].join(":");
+    const hit = mapCache.get(key);
+    if (hit) return { url: hit, mw, mh };
+
+    const cv = document.createElement("canvas");
+    cv.width = mw; cv.height = mh;
+    const ctx = cv.getContext("2d");
+    const img = ctx.createImageData(mw, mh);
+    const px = img.data;
+
+    const hx = w / 2, hy = h / 2;
+    // 到圆角矩形边缘的有向距离（中心在贴图正中）
+    const sdf = (x, y) => {
+      const qx = Math.abs(x - mw / 2) - (hx - radius);
+      const qy = Math.abs(y - mh / 2) - (hy - radius);
+      const ox = Math.max(qx, 0), oy = Math.max(qy, 0);
+      return Math.hypot(ox, oy) + Math.min(Math.max(qx, qy), 0) - radius;
+    };
+
+    for (let y = 0; y < mh; y++) {
+      for (let x = 0; x < mw; x++) {
+        const cx = x + 0.5, cy = y + 0.5;
+        const s = sdf(cx, cy);
+        const gx = sdf(cx + 1, cy) - sdf(cx - 1, cy);
+        const gy = sdf(cx, cy + 1) - sdf(cx, cy - 1);
+        const len = Math.hypot(gx, gy) || 1;
+        const nx = gx / len, ny = gy / len;
+        const span = s < 0 ? rim + feather : rim;
+        let amt = Math.max(0, 1 - Math.abs(s) / span);
+        amt = amt * amt * amt * (amt * (amt * 6 - 15) + 10); // smootherstep
+        amt = Math.pow(amt, curve);
+        const i = (y * mw + x) * 4;
+        px[i]     = clamp255(Math.round(127.5 - nx * amt * 127 * BOOST)); // R = x 位移
+        px[i + 1] = clamp255(Math.round(127.5 - ny * amt * 127 * BOOST)); // G = y 位移
+        px[i + 2] = 128;
+        px[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const url = cv.toDataURL("image/png");
+    if (mapCache.size > 200) mapCache.delete(mapCache.keys().next().value);
+    mapCache.set(key, url);
+    return { url, mw, mh };
+  }
+
+  // ——— 注入 filter（每帧换新 id 绕过 Safari 缓存） ———
+  function applyFilter(mapUrl, mw, mh) {
+    const id = `lensfx-v${++version}`;
+    const sc = state.depth;
+
+    let disp;
+    if (state.chroma > 0) {
+      // 色散：红色用更大位移、绿/蓝用更小位移，分两次位移后按通道合成
+      const sR = sc * (1 + state.chroma);
+      const sB = sc * (1 - state.chroma);
+      disp = `
+        <feDisplacementMap in="SourceGraphic" in2="map" scale="${sR}" xChannelSelector="R" yChannelSelector="G" result="dR"/>
+        <feDisplacementMap in="SourceGraphic" in2="map" scale="${sB}" xChannelSelector="R" yChannelSelector="G" result="dGB"/>
+        <feColorMatrix in="dR"  type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="cR"/>
+        <feColorMatrix in="dGB" type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 1 0" result="cGB"/>
+        <feComposite in="cR" in2="cGB" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="disp"/>`;
+    } else {
+      disp = `<feDisplacementMap in="SourceGraphic" in2="map" scale="${sc}" xChannelSelector="R" yChannelSelector="G" result="disp"/>`;
+    }
+
+    housing.innerHTML = `
+      <defs>
+        <filter id="${id}" x="0" y="0" width="100%" height="100%"
+                filterUnits="objectBoundingBox" color-interpolation-filters="sRGB">
+          <feImage href="${mapUrl}" xlink:href="${mapUrl}"
+                   x="0" y="0" width="${mw}" height="${mh}" preserveAspectRatio="none" result="map"/>
+          ${disp}
+        </filter>
+      </defs>`;
+    refraction.style.filter = `url(#${id})`;
+  }
+
+  // ——— 重绘：克隆场景、对齐、生成贴图、套滤镜 ———
+  function repaint() {
+    const { x, y, w, h, r } = state;
+
+    // 镜片几何
+    lens.style.left = x + "px";
+    lens.style.top = y + "px";
+    lens.style.width = w + "px";
+    lens.style.height = h + "px";
+    lens.style.borderRadius = r + "px";
+
+    const mw = w + 2 * PAD, mh = h + 2 * PAD;
+    refraction.style.left = -PAD + "px";
+    refraction.style.top = -PAD + "px";
+    refraction.style.width = mw + "px";
+    refraction.style.height = mh + "px";
+    refraction.style.clipPath = `inset(${PAD}px round ${r}px)`;
+
+    blurWrap.style.filter = state.blur > 0 ? `blur(${state.blur}px)` : "none";
+
+    // 克隆场景并铺成场景原尺寸，错位对齐到镜片左上
+    const sceneRect = scene.getBoundingClientRect();
+    const lensLeft = x, lensTop = y; // lens 是 scene 的兄弟、同一定位上下文
+    clone.innerHTML = scene.innerHTML;
+    clone.style.width = sceneRect.width + "px";
+    clone.style.height = sceneRect.height + "px";
+    clone.style.left = -(lensLeft - PAD) + "px";
+    clone.style.top = -(lensTop - PAD) + "px";
+
+    // 叠加层
+    tintLayer.style.opacity = state.tint;
+    tintLayer.style.background = state.tintColor;
+    glintLayer.style.opacity = Math.min(1, state.glint / 100);
+
+    const map = buildLensMap(w, h, r, state.splay, state.curve, state.feather);
+    applyFilter(map.url, map.mw, map.mh);
+  }
+
+  // ——— 拖拽 ———
+  let drag = null;
+  lens.addEventListener("pointerdown", (e) => {
+    if (collapsed) return;
+    drag = { dx: e.clientX - state.x, dy: e.clientY - state.y };
+    lens.classList.add("dragging");
+    lens.setPointerCapture(e.pointerId);
+  });
+  lens.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const cr = canvas.getBoundingClientRect();
+    state.x = Math.max(-PAD, Math.min(cr.width - state.w + PAD, e.clientX - drag.dx));
+    state.y = Math.max(-PAD, Math.min(cr.height - state.h + PAD, e.clientY - drag.dy));
+    repaint();
+  });
+  const endDrag = () => { drag = null; lens.classList.remove("dragging"); };
+  lens.addEventListener("pointerup", endDrag);
+  lens.addEventListener("pointercancel", endDrag);
+
+  // ——— 控制面板 ———
+  const bind = (id, key, fmt = v => v) => {
+    const el = document.getElementById(id);
+    const out = document.getElementById(id + "-v");
+    const onInput = () => {
+      const v = el.type === "color" ? el.value : parseFloat(el.value);
+      state[key] = v;
+      if (out) out.textContent = fmt(v);
+      repaint();
+    };
+    el.addEventListener("input", onInput);
+    return el;
+  };
+  bind("depth", "depth");
+  bind("splay", "splay");
+  bind("feather", "feather");
+  bind("curve", "curve");
+  bind("blur", "blur");
+  bind("chroma", "chroma");
+  bind("glint", "glint");
+  bind("tint", "tint");
+  document.getElementById("tintColor").addEventListener("input", (e) => {
+    state.tintColor = e.target.value; repaint();
+  });
+
+  // ——— 预设 ———
+  const PRESETS = {
+    soft:    { depth: 60,  splay: 2,  feather: 24, curve: 2,   blur: 0,   chroma: 0,    glint: 25, tint: 0,    tintColor: "#ffffff" },
+    thick:   { depth: 110, splay: 6,  feather: 18, curve: 2.4, blur: 1,   chroma: 0.04, glint: 40, tint: 0.06, tintColor: "#cfe8ff" },
+    frosted: { depth: 45,  splay: 4,  feather: 30, curve: 1.8, blur: 4,   chroma: 0,    glint: 30, tint: 0.12, tintColor: "#ffffff" },
+    cut:     { depth: 95,  splay: 20, feather: 4,  curve: 0.6, blur: 0,   chroma: 0.12, glint: 90, tint: 0,    tintColor: "#ffffff" },
+    plexi:   { depth: 70,  splay: 8,  feather: 16, curve: 2,   blur: 0.5, chroma: 0.06, glint: 35, tint: 0.45, tintColor: "#ff7a18" },
+  };
+  document.querySelectorAll(".preset").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const p = PRESETS[btn.dataset.preset];
+      if (!p) return;
+      Object.assign(state, p);
+      // 同步 UI
+      for (const k in p) {
+        const el = document.getElementById(k === "tintColor" ? "tintColor" : k);
+        if (!el) continue;
+        el.value = p[k];
+        const out = document.getElementById(k + "-v");
+        if (out) out.textContent = p[k];
+      }
+      repaint();
+    });
+  });
+
+  // ——— FAB：收起 / 展开（rAF 缓动 size + radius + position） ———
+  const FULL = () => ({ x: state.x, y: state.y, w: 320, h: 220, r: 44 });
+  let collapsed = false;
+  let savedFull = null;
+  let animId = 0;
+  const easeInOut = t => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+
+  function animateTo(target, dur = 520) {
+    cancelAnimationFrame(animId);
+    const from = { x: state.x, y: state.y, w: state.w, h: state.h, r: state.r };
+    let start = 0;
+    const tick = (now) => {
+      if (!start) start = now;
+      const e = easeInOut(Math.min(1, (now - start) / dur));
+      state.x = from.x + (target.x - from.x) * e;
+      state.y = from.y + (target.y - from.y) * e;
+      state.w = from.w + (target.w - from.w) * e;
+      state.h = from.h + (target.h - from.h) * e;
+      state.r = from.r + (target.r - from.r) * e;
+      repaint();
+      if (now - start < dur) animId = requestAnimationFrame(tick);
+    };
+    animId = requestAnimationFrame(tick);
+  }
+
+  fab.addEventListener("click", () => {
+    const cr = canvas.getBoundingClientRect();
+    collapsed = !collapsed;
+    fab.classList.toggle("collapsed", collapsed);
+    if (collapsed) {
+      savedFull = { x: state.x, y: state.y, w: state.w, h: state.h, r: state.r };
+      const size = 56, m = 20;
+      animateTo({ x: cr.width/2 - size/2, y: cr.height - m - size, w: size, h: size, r: size/2 });
+    } else {
+      animateTo(savedFull || FULL());
+    }
+  });
+
+  // 窗口尺寸变化时重绘对齐
+  window.addEventListener("resize", repaint);
+
+  // 首帧
+  repaint();
+})();
+</script>
+</body>
+</html>
