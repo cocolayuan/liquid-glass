@@ -148,8 +148,11 @@ function MinimizeGlass({
   )
 }
 
-// 背景图：public/Image.jpg（用 BASE_URL 适配 GitHub Pages 子路径）
-const BG = `${import.meta.env.BASE_URL}Image.jpg`
+// 可选背景图（放在 public/，用 BASE_URL 适配 GitHub Pages 子路径）
+const BACKGROUNDS = [
+  { label: '背景 1', file: 'Image.jpg' },
+  { label: '背景 2', file: 'Image2.jpg' },
+]
 
 // 快捷预设（含 tintColor，一键套用整套外观）
 const PRESETS: Record<string, Params> = {
@@ -225,6 +228,10 @@ export default function App() {
 
   const set = (k: keyof Params, v: number | string) =>
     setP((prev) => ({ ...prev, [k]: v }))
+
+  // 当前背景
+  const [bgFile, setBgFile] = useState(BACKGROUNDS[0].file)
+  const BG = `${import.meta.env.BASE_URL}${bgFile}`
 
   // ——— 页面滚动 + 背景视差 ———
   const PARALLAX = 0.7 // 背景按 0.7x 移动（比内容慢 → 视差）
@@ -485,7 +492,7 @@ export default function App() {
           padding: 18,
           background: '#1c1c1e',
           color: '#e6e6e6',
-          font: '13px -apple-system, system-ui, sans-serif',
+          font: '13px Questrial, -apple-system, sans-serif',
           display: 'flex',
           flexDirection: 'column',
           gap: 12,
@@ -571,7 +578,7 @@ export default function App() {
                 color: '#eee',
                 border: 'none',
                 borderRadius: 8,
-                font: '600 13px -apple-system, system-ui, sans-serif',
+                font: '600 13px Questrial, -apple-system, sans-serif',
                 textAlign: 'left',
               }}
               onMouseEnter={(e) => (e.currentTarget.style.background = '#558855')}
@@ -580,6 +587,42 @@ export default function App() {
               {name}
             </button>
           ))}
+        </div>
+
+        {/* 背景下拉（置于面板底部） */}
+        <div style={{ marginTop: 'auto', paddingTop: 12 }}>
+          <div
+            style={{
+              fontSize: 12,
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase',
+              color: '#8a8a90',
+              marginBottom: 8,
+            }}
+          >
+            Background
+          </div>
+          <select
+            value={bgFile}
+            onChange={(e) => setBgFile(e.target.value)}
+            style={{
+              width: '100%',
+              padding: '9px 12px',
+              cursor: 'pointer',
+              background: '#010101',
+              color: '#eee',
+              border: '1px solid #333',
+              borderRadius: 8,
+              font: '600 13px Questrial, -apple-system, sans-serif',
+              appearance: 'none',
+            }}
+          >
+            {BACKGROUNDS.map((b) => (
+              <option key={b.file} value={b.file}>
+                {b.label}
+              </option>
+            ))}
+          </select>
         </div>
       </aside>
     </div>
