@@ -15,14 +15,12 @@ body {
   overflow-x: hidden;
 }
 
-/* 共享下拉切换时内容交叉淡入 */
+/* 共享下拉切换时内容交叉淡入（纯透明度，不做垂直位移，避免间距瞬时不一致） */
 @keyframes lgFade {
   from {
     opacity: 0;
-    transform: translateY(-4px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
