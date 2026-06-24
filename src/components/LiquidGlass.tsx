@@ -166,6 +166,7 @@ export function LiquidGlass({
   const refractionRef = useRef<HTMLDivElement>(null)
   const cloneWrapRef = useRef<HTMLDivElement>(null)
   const housingRef = useRef<SVGSVGElement>(null)
+  const lastCloneHtml = useRef('') // 仅在内容变化时重建克隆，滚动时不重建
 
   const MAP_W = (width + 2 * PAD) * SS
   const MAP_H = (height + 2 * PAD) * SS
@@ -218,8 +219,12 @@ export function LiquidGlass({
     const lensLeftInScene = lensRect.left - sceneRect.left
     const lensTopInScene = lensRect.top - sceneRect.top
 
-    // 克隆场景内容并铺成场景原尺寸
-    cloneWrap.innerHTML = scene.innerHTML
+    // 克隆场景内容（仅在内容真正变化时重建 DOM，滚动/对齐时复用，避免抽搐）
+    const html = scene.innerHTML
+    if (lastCloneHtml.current !== html) {
+      cloneWrap.innerHTML = html
+      lastCloneHtml.current = html
+    }
     cloneWrap.style.width = `${sceneRect.width}px`
     cloneWrap.style.height = `${sceneRect.height}px`
     cloneWrap.style.left = `${-(lensLeftInScene - PAD)}px`
@@ -246,15 +251,15 @@ export function LiquidGlass({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [width, height, radius, depth, splay, feather, curve, bias, biasAngle, chroma, repaintKey])
 
-  // 跟随滚动 / 窗口尺寸变化重绘对齐
+  // 仅监听尺寸变化重绘对齐。
+  // 滚动不在这里处理：滚动对齐由父级把 scrollY 传入 repaintKey 驱动，
+  // 这样重绘发生在视差 transform 提交之后（useLayoutEffect），单次且对齐正确，避免抽搐。
   useEffect(() => {
     const onChange = () => repaint()
-    window.addEventListener('scroll', onChange, true)
     window.addEventListener('resize', onChange)
     const ro = new ResizeObserver(onChange)
     if (sceneRef.current) ro.observe(sceneRef.current)
     return () => {
-      window.removeEventListener('scroll', onChange, true)
       window.removeEventListener('resize', onChange)
       ro.disconnect()
     }
