@@ -127,8 +127,12 @@ function MinimizeGlass({
           }}
         >
           <div style={{ opacity: fullness, textAlign: 'center', padding: 16 }}>
-            <div style={{ fontSize: 20, fontWeight: 700 }}>Liquid Glass</div>
-            <div style={{ fontSize: 13, opacity: 0.85, marginTop: 6 }}>
+            <div
+              style={{ fontSize: 24, fontWeight: 700, fontFamily: "'Outfit', sans-serif" }}
+            >
+              Liquid Glass
+            </div>
+            <div style={{ fontSize: 15, opacity: 0.85, marginTop: 6 }}>
               拖动移动 · 点击收起/展开
             </div>
           </div>
@@ -184,12 +188,16 @@ const MENUS: Record<MenuKey, string[]> = {
   Resources: ['Docs', 'Guides', 'Blog', 'Community'],
   Company: ['About', 'Careers', 'Contact'],
 }
-// 每个菜单的宽度（按最长项收紧，避免右侧留白）
+// 每个菜单的宽度（按最长项收紧，整体放大 20% 后的尺寸）
 const MENU_W: Record<MenuKey, number> = {
-  Product: 186, // "Integrations"
-  Resources: 162, // "Community"
-  Company: 146, // "Careers"
+  Product: 224, // "Integrations"
+  Resources: 196, // "Community"
+  Company: 176, // "Careers"
 }
+// 下拉项的统一行高 + 上下内边距（保证上下间距一致）
+const ITEM_H = 56
+const MENU_PADV = 14
+const menuHeight = (key: MenuKey) => MENUS[key].length * ITEM_H + MENU_PADV * 2
 
 interface Params {
   radius: number
@@ -278,7 +286,7 @@ export default function App() {
     const navRect = nav.getBoundingClientRect()
     const bRect = btn.getBoundingClientRect()
     const w = MENU_W[open]
-    const h = MENUS[open].length * 50 + 24
+    const h = menuHeight(open)
     const cx = bRect.left - navRect.left + bRect.width / 2
     const target = { x: cx - w / 2, w, h }
     cancelAnimationFrame(geoRaf.current)
@@ -361,10 +369,11 @@ export default function App() {
             zIndex: 5,
             display: 'flex',
             justifyContent: 'center',
-            gap: 44,
+            gap: 52,
             color: '#fff',
+            fontFamily: "'Outfit', sans-serif",
             fontWeight: 600,
-            fontSize: 19,
+            fontSize: 23,
             textShadow: '0 1px 6px rgba(0,0,0,0.4)',
           }}
         >
@@ -392,7 +401,7 @@ export default function App() {
                   display: 'inline-block',
                   transition: 'transform 0.25s',
                   transform: open === key ? 'rotate(180deg)' : 'none',
-                  fontSize: 13,
+                  fontSize: 16,
                 }}
               >
                 ⌄
@@ -440,7 +449,7 @@ export default function App() {
                   style={{
                     display: 'flex',
                     flexDirection: 'column',
-                    padding: '12px 12px',
+                    padding: `${MENU_PADV}px 10px`,
                     animation: 'lgFade 0.22s ease',
                   }}
                 >
@@ -450,11 +459,14 @@ export default function App() {
                       href="#"
                       onClick={(e) => e.preventDefault()}
                       style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        height: ITEM_H,
                         color: '#fff',
                         textDecoration: 'none',
-                        fontSize: 18,
+                        fontSize: 22,
                         fontWeight: 500,
-                        padding: '13px 18px',
+                        padding: '0 18px',
                         borderRadius: 12,
                         transition: 'background 0.18s',
                         textShadow: '0 1px 4px rgba(0,0,0,0.35)',
